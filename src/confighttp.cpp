@@ -25,6 +25,7 @@
 
 // local includes
 #include "config.h"
+#include "auth_sessions.h"
 #include "confighttp.h"
 #include "crypto.h"
 #include "display_device.h"
@@ -59,9 +60,9 @@ namespace confighttp {
     REMOVE  ///< Remove client
   };
 
-  // SESSION COOKIE
-  std::string sessionCookie;
-  static std::chrono::time_point<std::chrono::steady_clock> cookie_creation_time;
+  static auth_sessions_t sessions;
+  // Serialize credential reads/rotation with session issuance and validation.
+  static std::mutex credentials_mutex;
 
   /**
    * @brief Log the request details.
@@ -71,7 +72,9 @@ namespace confighttp {
     BOOST_LOG(debug) << "METHOD :: "sv << request->method;
     BOOST_LOG(debug) << "DESTINATION :: "sv << request->path;
     for (auto &[name, val] : request->header) {
-      BOOST_LOG(debug) << name << " -- " << (name == "Authorization" ? "CREDENTIALS REDACTED" : val);
+      BOOST_LOG(debug) << name << " -- " <<
+        ((boost::iequals(name, "Authorization") || boost::iequals(name, "Cookie") ||
+          boost::iequals(name, "Set-Cookie")) ? "CREDENTIALS REDACTED" : val);
     }
     BOOST_LOG(debug) << " [--] "sv;
     for (auto &[name, val] : request->parse_query_string()) {
@@ -178,6 +181,7 @@ namespace confighttp {
   bool authenticate(resp_https_t response, req_https_t request, bool needsRedirect = false) {
     if (!checkIPOrigin(response, request))
       return false;
+    std::lock_guard credentials_lock(credentials_mutex);
     // If credentials not set, redirect to welcome.
     if (config::sunshine.username.empty()) {
       send_redirect(response, request, "/welcome");
@@ -193,19 +197,12 @@ namespace confighttp {
         send_unauthorized(response, request);
       }
     });
-    if (sessionCookie.empty())
-      return false;
-    // Check for expiry
-    if (std::chrono::steady_clock::now() - cookie_creation_time > SESSION_EXPIRE_DURATION) {
-      sessionCookie.clear();
-      return false;
-    }
     auto cookies = request->header.find("cookie");
     if (cookies == request->header.end())
       return false;
     auto authCookie = getCookieValue(cookies->second, "auth");
     if (authCookie.empty() ||
-        util::hex(crypto::hash(authCookie + config::sunshine.salt)).to_string() != sessionCookie)
+        !sessions.contains(util::hex(crypto::hash(authCookie + config::sunshine.salt)).to_string()))
       return false;
     fg.disable();
     return true;
@@ -1027,6 +1024,7 @@ namespace confighttp {
     nlohmann::json output_tree;
     output_tree["status"] = true;
     output_tree["locale"] = config::sunshine.locale;
+    output_tree["auth_sessions"] = "multiple-v1";
     send_response(response, output_tree);
   }
 
@@ -1172,7 +1170,12 @@ namespace confighttp {
    * @api_examples{/api/password| POST| {"currentUsername":"admin","currentPassword":"admin","newUsername":"admin","newPassword":"admin","confirmNewPassword":"admin"}}
    */
   void savePassword(resp_https_t response, req_https_t request) {
-    if ((!config::sunshine.username.empty() && !authenticate(response, request)) || !validateContentType(response, request, "application/json"))
+    bool credentials_set;
+    {
+      std::lock_guard credentials_lock(credentials_mutex);
+      credentials_set = !config::sunshine.username.empty();
+    }
+    if ((credentials_set && !authenticate(response, request)) || !validateContentType(response, request, "application/json"))
       return;
     print_req(request);
     std::vector<std::string> errors;
@@ -1186,6 +1189,7 @@ namespace confighttp {
       std::string password = input_tree.value("currentPassword", "");
       std::string newPassword = input_tree.value("newPassword", "");
       std::string confirmPassword = input_tree.value("confirmNewPassword", "");
+      std::lock_guard credentials_lock(credentials_mutex);
       if (newUsername.empty())
         newUsername = username;
       if (newUsername.empty()) {
@@ -1199,7 +1203,7 @@ namespace confighttp {
           else {
             http::save_user_creds(config::sunshine.credentials_file, newUsername, newPassword);
             http::reload_user_creds(config::sunshine.credentials_file);
-            sessionCookie.clear(); // force re-login
+            sessions.clear(); // Password rotation revokes every session.
             output_tree["status"] = true;
           }
         } else {
@@ -1480,12 +1484,18 @@ namespace confighttp {
       nlohmann::json input_tree = nlohmann::json::parse(ss.str());
       std::string username = input_tree.value("username", "");
       std::string password = input_tree.value("password", "");
+      std::lock_guard credentials_lock(credentials_mutex);
       std::string hash = util::hex(crypto::hash(password + config::sunshine.salt)).to_string();
       if (!boost::iequals(username, config::sunshine.username) || hash != config::sunshine.password)
         return;
       std::string sessionCookieRaw = crypto::rand_alphabet(64);
-      sessionCookie = util::hex(crypto::hash(sessionCookieRaw + config::sunshine.salt)).to_string();
-      cookie_creation_time = std::chrono::steady_clock::now();
+      if (!sessions.insert(util::hex(crypto::hash(sessionCookieRaw + config::sunshine.salt)).to_string())) {
+        fg.disable();
+        nlohmann::json error {{"status", false}, {"status_code", 503}, {"error", "Authentication session capacity reached"}};
+        response->write(SimpleWeb::StatusCode::server_error_service_unavailable, error.dump(),
+                        {{"Content-Type", "application/json"}});
+        return;
+      }
       const SimpleWeb::CaseInsensitiveMultimap headers {
         { "Set-Cookie", "auth=" + sessionCookieRaw + "; Secure; SameSite=Strict; Max-Age=2592000; Path=/" }
       };
@@ -1493,7 +1503,7 @@ namespace confighttp {
       fg.disable();
     } catch (std::exception &e) {
       BOOST_LOG(warning) << "Web UI Login failed: ["sv << net::addr_to_normalized_string(request->remote_endpoint().address())
-                               << "]: "sv << e.what();
+                               << "]: invalid login request or internal error"sv;
       response->write(SimpleWeb::StatusCode::server_error_internal_server_error);
       fg.disable();
       return;
