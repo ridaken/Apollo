@@ -4,6 +4,9 @@ This branch starts at Apollo 0.4.6 commit
 `0cd32abaaa141d262477d039ac447b38fe99c394`. The upstream `master` branch is
 unchanged. Changes are reviewed here before deployment; upstream updates are
 merged explicitly and require a new validation cycle.
+The custom branch is the fork's default, so its workflow can be dispatched on
+demand. PRs target the separate `integration` branch; no PR targets upstream or
+modifies the preserved `master` branch.
 
 ## Authentication
 
@@ -27,6 +30,8 @@ login/poll simulation), then produces a portable ZIP. Run it from this branch,
 or push changes to trigger it. Each artifact includes its source commit, package
 SHA-256, submodule revisions, and test results. This is a custom unsigned build,
 not an official Apollo release. Its version includes `llama-auth` and the commit.
+The build checks whether the Windows SDK already declares the synthetic pointer
+API, keeping Apollo's fallback declarations only when absent.
 
 Local builds use the dependencies and commands in `docs/building.md`.
 To run just the session-store tests without the graphics stack:
@@ -42,7 +47,8 @@ g++ -std=c++23 -pthread -I. -Ithird-party/googletest/googletest/include \
 ## Deployment and rollback
 
 Use the companion llama-monitor `scripts/apollo-build.ps1` installer after
-verifying the artifact checksum. It checks that streams are disconnected,
+verifying the artifact checksum. End streams and explicitly confirm disconnection;
+the installer rejects any connected clients reported by the monitor,
 backs up installed program files and configuration, and replaces program files
 only. It does not install drivers, change pairing, install hooks, or enable AI
 switching. Rollback restores the original program files and preserves current

@@ -2,6 +2,21 @@
 
 add_compile_definitions(SUNSHINE_PLATFORM="windows")
 
+# Modern MinGW headers provide the synthetic pointer API. Keep the legacy
+# declarations only for SDKs that do not, instead of redeclaring its handle.
+include(CheckCXXSourceCompiles)
+check_cxx_source_compiles("
+    #define WINVER 0x0A00
+    #include <windows.h>
+    using create_t = decltype(&CreateSyntheticPointerDevice);
+    using inject_t = decltype(&InjectSyntheticPointerInput);
+    using destroy_t = decltype(&DestroySyntheticPointerDevice);
+    int main() { HSYNTHETICPOINTERDEVICE device = nullptr; return device != nullptr; }
+" APOLLO_HAS_SYNTHETIC_POINTER_API)
+if(APOLLO_HAS_SYNTHETIC_POINTER_API)
+    add_compile_definitions(APOLLO_HAS_SYNTHETIC_POINTER_API)
+endif()
+
 enable_language(RC)
 set(CMAKE_RC_COMPILER windres)
 set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -static")
