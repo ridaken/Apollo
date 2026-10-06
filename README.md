@@ -1,5 +1,11 @@
 # Apollo
 
+This fork maintains the **llama-monitor integration build** on
+`codex/llama-monitor-integration`. It adds independent browser/monitor sessions;
+upstream `master` remains unchanged. See
+[build, authentication, and rollout instructions](docs/llama-monitor-integration.md).
+The fork's Windows build workflow produces source-labelled packages and checksums.
+
 Apollo is a self-hosted desktop stream host for [Artemis(Moonlight Noir)](https://github.com/ClassicOldSong/moonlight-android). Offering low latency, native client resolution, cloud gaming server capabilities with support for AMD, Intel, and Nvidia GPUs for hardware encoding. Software encoding is also available. A web UI is provided to allow configuration and client pairing from your favorite web browser. Pair from the local server or any mobile device.
 
 Major features:
